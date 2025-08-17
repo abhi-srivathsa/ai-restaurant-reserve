@@ -13,7 +13,7 @@ A complete **Model Context Protocol (MCP)** server for restaurant discovery and 
 
 ## 📋 Prerequisites
 
-- Python 3.9+ 
+- Python 3.10+ 
 - Google Cloud Account (free tier)
 - Google AI Studio Account (free)
 
