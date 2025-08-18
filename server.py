@@ -359,6 +359,10 @@ Please arrive 5-10 minutes early.
         with open(filename, 'w') as f:
             f.write(ics_content)
 
+        import subprocess
+        subprocess.run(["open", filename])
+
+
         return {
             "status": "success",
             "reservation_id": reservation_id,
