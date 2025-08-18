@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.11
 """
 Restaurant Reservation MCP Server
 Integrates with Google AI Studio (Gemini API) and Google Places API
@@ -15,9 +15,23 @@ import uuid
 import requests
 from fastmcp import FastMCP
 from ics import Calendar, Event
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,                    # Set level to info
+    format="%(levelname)s:%(name)s:%(message)s"  # Format (optional)
+)
+log = logging.getLogger(__name__)
+
 
 # Initialize MCP server
 mcp = FastMCP("Restaurant Reservation Server")
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # Configuration - Set these environment variables
 GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY")
@@ -57,10 +71,12 @@ class Reservation:
 @mcp.tool
 def search_restaurants(
     location: str = "Los Angeles, CA",
-    cuisine_type: str = "Italian", 
+    cuisine_type: str = "Italian",
     radius: int = 5000,
     min_rating: float = 4.0,
-    max_results: int = 10
+    max_results: int = 10,
+    special_requirements: str = "",
+    party_size: int = 2
 ) -> Dict[str, Any]:
     """
     Search for restaurants using Google Places API
@@ -78,7 +94,7 @@ def search_restaurants(
 
     if not GOOGLE_PLACES_API_KEY:
         return {"error": "Google Places API key not configured"}
-
+    
     try:
         # First, get coordinates for the location
         geocode_url = "https://maps.googleapis.com/maps/api/geocode/json"
@@ -89,10 +105,9 @@ def search_restaurants(
 
         geocode_response = requests.get(geocode_url, params=geocode_params)
         geocode_data = geocode_response.json()
-
+        log.info(geocode_data)
         if not geocode_data.get("results"):
             return {"error": f"Could not find location: {location}"}
-
         lat = geocode_data["results"][0]["geometry"]["location"]["lat"]
         lng = geocode_data["results"][0]["geometry"]["location"]["lng"]
 
@@ -110,12 +125,11 @@ def search_restaurants(
 
         response = requests.get(places_url, params=params)
         data = response.json()
-
+        log.info(data)
         if "results" not in data:
             return {"error": "No restaurants found"}
 
         restaurants = []
-
         for result in data["results"][:max_results]:
             if result.get("rating", 0) >= min_rating:
                 restaurant = {
@@ -400,4 +414,4 @@ def list_reservations(customer_email: str = "") -> Dict[str, Any]:
 
 if __name__ == "__main__":
     # Run the MCP server
-    mcp.run()
+    mcp.run(transport="http", host="127.0.0.1", port=9000)

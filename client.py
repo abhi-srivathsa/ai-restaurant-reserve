@@ -6,6 +6,7 @@ Interactive client for the Restaurant Reservation MCP Server using MCP protocol 
 - No mock data; calls real endpoints and displays results
 """
 import os
+import re
 import json
 import asyncio
 from typing import Dict, Any
@@ -20,7 +21,7 @@ except ImportError:
     pass
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:8000")
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:9000/mcp")
 
 if not GEMINI_API_KEY:
     print("Error: Please set GEMINI_API_KEY environment variable")
@@ -30,7 +31,7 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 class RestaurantAssistant:
     def __init__(self):
-        self.model = genai.GenerativeModel('gemini-pro')
+        self.model = genai.GenerativeModel('models/gemini-2.5-pro')
         self.mcp_client = Client(MCP_SERVER_URL)
 
     async def run(self):
@@ -49,11 +50,12 @@ class RestaurantAssistant:
                 continue
 
             print("Searching for restaurants..")
-            restaurants = await self.mcp_client.call_tool("search_restaurants", params)
-            if not restaurants.get("restaurants"):
+            async with self.mcp_client:
+                restaurants_result = await self.mcp_client.call_tool("search_restaurants", params)
+            if not restaurants_result.data.get("restaurants"):
                 print("No restaurants found. Try a different search.")
                 continue
-
+            restaurants = restaurants_result.data
             for idx, r in enumerate(restaurants["restaurants"]):
                 print(f"{idx+1}. {r['name']} (Rating: {r.get('rating', '-')}) - {r['address']}")
                 print(f"   Phone: {r.get('phone', '-')}, Website: {r.get('website', '-')}")
@@ -84,8 +86,9 @@ class RestaurantAssistant:
                 "date": date,
                 "party_size": party_size
             }
-            slots_result = await self.mcp_client.call_tool("get_available_slots", slot_params)
-            slots = slots_result.get("available_slots", [])
+            async with self.mcp_client:
+                slots_result = await self.mcp_client.call_tool("get_available_slots", slot_params)
+            slots = slots_result.data.get("available_slots", [])
             if not slots:
                 print("No slots available. Try a different restaurant or date.")
                 continue
@@ -115,15 +118,17 @@ class RestaurantAssistant:
                 "customer_email": email,
                 "special_requests": special_requests
             }
-            result = await self.mcp_client.call_tool("make_reservation", reservation_params)
-            rid = result.get("reservation_id")
+            async with self.mcp_client:
+                result = await self.mcp_client.call_tool("make_reservation", reservation_params)
+            rid = result.data.get("reservation_id")
             print("Reservation:")
-            for k, v in result.items():
+            for k, v in result.data.items():
                 print(f"  {k}: {v}")
             # Generate calendar invite if confirmed
             if rid:
-                cal_result = await self.mcp_client.call_tool("generate_calendar_invite", {"reservation_id": rid})
-                fname = cal_result.get("filename")
+                async with self.mcp_client:
+                    cal_result = await self.mcp_client.call_tool("generate_calendar_invite", {"reservation_id": rid})
+                fname = cal_result.data.get("filename")
                 if fname:
                     print(f"Calendar invite saved as: {fname}")
                 else:
@@ -131,24 +136,81 @@ class RestaurantAssistant:
             print("---")
 
     async def extract_params(self, user_query: str) -> Dict[str, Any]:
-        prompt = f"""
-        Extract these fields from the restaurant search request: "{user_query}". 
-        Return valid JSON for the following keys:
-          - location: string
-          - cuisine_type: string
-          - min_rating: float
-          - max_results: int (default 10)
-        Omit keys if not specified.
-        """
+        prompt = (
+            f'Extract the following fields as JSON from: "{user_query}". '
+            'Fields:\n'
+            '- location: string (look for any type of location - city, area, etc, where, if given, or Los Angeles)\n'
+            '- cuisine_type: string (like ramen)\n'
+            '- special_requirements: string (e.g., vegetarian, gluten-free, blank if not present)\n'
+            '- party_size: integer (default 2 if not stated)\n'
+            '- min_rating: float (default 4.0)\n'
+            '- max_results: int (default 10)\n'
+            'Return ONLY valid JSON as your reply. No code fences, no explanations, no markdown, no comments.'
+        )
         try:
             response = self.model.generate_content(prompt)
-            return json.loads(response.text.strip())
+            print("Gemini output:", response.text)
+            return parse_json_response(response.text)
+
         except Exception as e:
             print(f"⚠️ Could not extract parameters automatically: {e}")
             # Fallback: ask user for info
             location = input("Enter a city/area (e.g. New York, NY): > ").strip()
             cuisine = input("Cuisine type (e.g. italian, sushi, etc): > ").strip()
             return {"location": location or "New York, NY", "cuisine_type": cuisine or "restaurant"}
+
+def parse_json_response(text):
+    """
+    Parse JSON from text that may contain markdown code blocks or other formatting.
+    
+    Args:
+        text (str): Input text potentially containing JSON with markdown formatting
+        
+    Returns:
+        dict: Parsed JSON object
+        
+    Raises:
+        ValueError: If no valid JSON is found or JSON is malformed
+    """
+    if not text or not isinstance(text, str):
+        raise ValueError("Input text must be a non-empty string")
+    
+    # Clean the text
+    cleaned = text.strip()
+    
+    # Remove markdown code blocks (with optional language specifier)
+    # This handles: ```json, ``````, etc.
+    cleaned = re.sub(r'^```\w*\s*\n?', '', cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r'\n?```\s*$', '', cleaned, flags=re.MULTILINE)
+    
+    # Remove any remaining backticks at start/end
+    cleaned = cleaned.strip('`').strip()
+    
+    # Try to find JSON block within the text
+    # Look for content between outermost { }
+    json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+    if json_match:
+        json_text = json_match.group(0)
+    else:
+        # Look for content between outermost [ ]
+        array_match = re.search(r'\[.*\]', cleaned, re.DOTALL)
+        if array_match:
+            json_text = array_match.group(0)
+        else:
+            json_text = cleaned
+    
+    # Try to parse the JSON
+    try:
+        return json.loads(json_text)
+    except json.JSONDecodeError as e:
+        # If direct parsing fails, try cleaning common issues
+        try:
+            # Remove trailing commas
+            fixed_json = re.sub(r',(\s*[}\]])', r'\1', json_text)
+            return json.loads(fixed_json)
+        except json.JSONDecodeError:
+            raise ValueError(f"Unable to parse JSON from text. Error: {str(e)}")
+
 
 if __name__ == "__main__":
     asyncio.run(RestaurantAssistant().run())
